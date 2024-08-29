@@ -1,2 +1,7 @@
-# created by virtualenv automatically
-*
+# Ignore Python virtual environment and cache files
+venv/
+__pycache__/
+*.pyc
+
+# Allow everything else
+!*
