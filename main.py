@@ -2,24 +2,49 @@ import json
 import time
 
 import html2text
-from fastapi import FastAPI, HTTPException
-
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import APIKeyHeader
 h = html2text.HTML2Text()
 h.ignore_links = True
 from mistralai import Mistral
-from typing import List
+from typing import List, Dict
+import os
+from dotenv import load_dotenv
+
+
+# Load the environment variables from the config.env file
+load_dotenv('config.env')
+
+API_KEY = os.getenv("API_KEY")
+API_KEY_NAME = "X-API-KEY"
+
 
 app = FastAPI()
+
+
+# Security dependency to verify API key
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+
+def verify_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
+        )
+
+
+
 
 mistral_client = Mistral(api_key="wldp0chTgdyU6dgGQ2AmWT8Kb0kNXgVW")
 
 clause_knowledge = json.load(open("Clause_Knowledge_0828_dirty.json", 'r'))
-all_tags = json.load(open("all_tags.json", 'r'))
+all_tags = json.load(open("all_tags_with_ids.json", 'r'))
 sol_and_cont = json.load(open("Solicitation and Contract.json", 'r', encoding='utf-8'))
 all_clauses = sol_and_cont["Clauses"]
 
 
-
+#--------------------------------------------------------------------------------------
 
 def get_section_clauses(selected_section, selected_subclause, filtered_titles):
     clauses = []
@@ -71,7 +96,7 @@ def get_section_clauses(selected_section, selected_subclause, filtered_titles):
 
 
 @app.post("/filter")
-async def filter_clauses(input_string: str, clauses: List[int], section: str, subclause):
+async def filter_clauses(input_string: str, clauses: List[int], section: str, subclause, api_key: str = Depends(verify_api_key)):
     try:
 
         clause = get_section_clauses(section, subclause, clauses)
@@ -160,39 +185,75 @@ def get_clause_knowledge(clause_ids: List[int]):
 
 # ------------------------------------------------------------------
 @app.post("/section_tags")
-def get_section_tags(alternative_names: List[str], selected_section: str, selected_subclause: str):
-    all_tags_of_section = all_tags[selected_section]
+def get_section_tags(selected_section: str, selected_subclause: str, api_key: str = Depends(verify_api_key)):
     relevant_question_tags = {}
-
     if selected_subclause == "All":
-        for question, clause_tags in all_tags_of_section.items():
-            tags_to_add = []
-            for clause, tags in clause_tags.items():
-                for tag in tags:
-                    if tag not in tags_to_add:
-                        tags_to_add.append(tag)
-            relevant_question_tags[question] = tags_to_add
-    else:
-        for alt_name in alternative_names:
-            for question, clause_tags in all_tags_of_section.items():
-                if question not in relevant_question_tags:
+        for tag_section in all_tags["section"]:
+            if tag_section["name"] == selected_section:
+                for question, clause_details in tag_section["question"].items():
                     relevant_question_tags[question] = []
-                for clause, tags in clause_tags.items():
-                    if clause == alt_name:
+                    tags_to_add = []
+                    for clause_tags in clause_details:
+                        clause = clause_tags["name"]
+                        tags = clause_tags["tags"]
                         for tag in tags:
-                            if tag not in relevant_question_tags[question]:
-                                relevant_question_tags[question].append(tag)
+                            if tag not in tags_to_add:
+                                tags_to_add.append(tag)
+                    relevant_question_tags[question] = tags_to_add
 
+    else:
+        for section in all_clauses:
+            if section["Name"] == selected_section:
+                if section["SubClauses"]:
+                    for alternatives in section["SubClauses"]:
+                        if selected_subclause == alternatives["Name"]:
+                            for alt in alternatives["Alternatives"]:
+                                if not alt["IsAdditional"] and alt["TemplateIdSector"] is None and alt[
+                                    "AlternativeClientReferenceId"] not in ["Heading", "heading"]:
+                                    for tag_section in all_tags["section"]:
+                                        if tag_section["name"] == selected_section:
+                                            for question, clause_details in tag_section["question"].items():
+                                                relevant_question_tags[question] = []
+                                                tags_to_add = []
+                                                for clause_tags in clause_details:
+                                                    clause = clause_tags["name"]
+                                                    tags = clause_tags["tags"]
+                                                    if clause == alt["Name"]:
+                                                        for tag in tags:
+                                                            if tag not in tags_to_add:
+                                                                tags_to_add.append(tag)
+                                                relevant_question_tags[question] = tags_to_add
+
+                for alt in section["Alternatives"]:
+                    if not alt["IsAdditional"] and alt["TemplateIdSector"] is None and alt[
+                        "AlternativeClientReferenceId"] not in ["Heading", "heading"]:
+                        for section in all_tags["section"]:
+                            if section["name"] == selected_section:
+                                for question, clause_details in section["question"].items():
+                                    relevant_question_tags[question] = []
+                                    tags_to_add = []
+                                    for clause_tags in clause_details:
+                                        clause = clause_tags["name"]
+                                        tags = clause_tags["tags"]
+                                        if clause == alt["Name"]:
+                                            for tag in tags:
+                                                if tag not in tags_to_add:
+                                                    tags_to_add.append(tag)
+                                    relevant_question_tags[question] = tags_to_add
     return relevant_question_tags
 
 
 @app.post("/filter_by_tags")
-def filter_dict_by_tags(data_dict, tags):
+def filter_dict_by_tags(selected_section: str, selected_subclause, tags: Dict[str, List[str]], api_key: str = Depends(verify_api_key)):
+    relevant_section = [section["question"] for section in all_tags["section"] if section["name"] == selected_section]
     title_per_question = {}
-    for (question, sub_dict_1), sub_dict_2 in zip(data_dict.items(), tags.values()):
-        all_q_tags = []
-        for q_tags in sub_dict_1.values():
-            all_q_tags.extend(q_tags)
+    new_relevant_section = {}
+    for question, details in relevant_section[0].items():
+        new_relevant_section[question] = {}
+        for clause in details:
+            if clause["name"] not in new_relevant_section[question]:
+                new_relevant_section[question][clause["name"]] = clause["tags"]
+    for (question, sub_dict_1), sub_dict_2 in zip(new_relevant_section.items(), tags.values()):
         title_per_question[question] = []
         for title, tags in sub_dict_1.items():
             tag_exists = all(item in tags for item in sub_dict_2)
@@ -204,4 +265,54 @@ def filter_dict_by_tags(data_dict, tags):
         common_values.intersection_update(title_per_question[key])
     common_values = list(common_values)
 
-    return common_values
+    return get_questions_result(selected_section, selected_subclause, common_values)
+
+
+def get_questions_result(selected_section, selected_subclause, filtered_titles):
+    clauses = []
+    clause_names = []
+    for section in all_clauses:
+        if section["Name"] == selected_section:
+            if section["SubClauses"]:
+                for subclause in section["SubClauses"]:
+                    if selected_subclause:
+                        if subclause["Name"] == selected_subclause:
+                            for alt in subclause["Alternatives"]:
+                                if not alt["IsAdditional"] and alt["TemplateIdSector"] is None and alt["AlternativeClientReferenceId"] not in ["Heading"]:
+                                # if alt["AlternativeClientReferenceId"] not in ["Heading"]:
+                                    clause_name = alt["Name"]
+                                    clause_text = h.handle(alt["Content"])
+                                    if filtered_titles:
+                                        if clause_name in filtered_titles:
+                                            clauses.append(f"Clause Name: {clause_name}\n\nClause Content: {clause_text}")
+                                            clause_names.append(f"{clause_name}")
+                                    else:
+                                        clauses.append(f"Clause Name: {clause_name}\n\nClause Content: {clause_text}")
+                                        clause_names.append(f"{clause_name}")
+                    else:
+                        for alt in subclause["Alternatives"]:
+                            if not alt["IsAdditional"] and alt["TemplateIdSector"] is None and alt["AlternativeClientReferenceId"] not in ["Heading"]:
+                            # if alt["AlternativeClientReferenceId"] not in ["Heading", "heading"]:
+                                clause_name = alt["Name"]
+                                clause_text = h.handle(alt["Content"])
+                                if filtered_titles:
+                                    if clause_name in filtered_titles:
+                                        clauses.append(f"Clause Name: {clause_name}\n\nClause Content: {clause_text}")
+                                        clause_names.append(f"{clause_name}")
+                                else:
+                                    clauses.append(f"Clause Name: {clause_name}\n\nClause Content: {clause_text}")
+                                    clause_names.append(f"{clause_name}")
+            for alt in section["Alternatives"]:
+                # if not alt["IsAdditional"] and alt["TemplateIdSector"] is None and alt["AlternativeClientReferenceId"] not in ["Heading"]:
+                if alt["AlternativeClientReferenceId"] not in ["Heading", "heading"]:
+                    clause_name = alt["Name"]
+                    clause_text = h.handle(alt["Content"])
+                    if filtered_titles:
+                        if alt["Name"] in filtered_titles:
+                            clauses.append(f"Clause Name: {clause_name}\n\nClause Content: {clause_text}")
+                            clause_names.append(f"{clause_name}")
+                    else:
+                        clauses.append(f"Clause Name: {clause_name}\n\nClause Content: {clause_text}")
+                        clause_names.append(f"{clause_name}")
+    return clause_names
+

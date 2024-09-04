@@ -3,5 +3,5 @@ venv/
 __pycache__/
 *.pyc
 
-# Allow everything else
-!*
+# Ignore environment files
+.env
